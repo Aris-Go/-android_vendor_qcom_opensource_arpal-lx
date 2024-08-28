@@ -1034,8 +1034,8 @@ int SessionAlsaUtils::setDeviceMediaConfig(std::shared_ptr<ResourceManager> rmHa
         dAttr->id == PAL_DEVICE_OUT_HANDSET ||
         dAttr->id == PAL_DEVICE_OUT_ULTRASOUND)) {
         std::string truncatedBeName = backEndName;
-        // remove "-VIRT-x" which length is 7
-        truncatedBeName.erase(truncatedBeName.end() - 7, truncatedBeName.end());
+        // remove "-VT-x" suffix
+        truncatedBeName.erase(truncatedBeName.end() - strlen(V_BE_SUFFIX) - 1, truncatedBeName.end());
         ctl = SessionAlsaUtils::getBeMixerControl(mixerHandle, truncatedBeName , BE_GROUP_ATTR);
         if (!ctl) {
         PAL_ERR(LOG_TAG, "invalid mixer control: %s %s", truncatedBeName.c_str(),
@@ -2386,7 +2386,8 @@ int SessionAlsaUtils::connectSessionDevice(Session* sess, Stream* streamHandle, 
             }
         }
         if (sAttr.direction == PAL_AUDIO_INPUT) {
-            if (strstr(dAttr.custom_config.custom_key , "unprocessed-hdr-mic")) {
+            if (strstr(dAttr.custom_config.custom_key , "unprocessed-hdr-mic") &&
+                (dAttr.id == PAL_DEVICE_IN_HANDSET_MIC || dAttr.id == PAL_DEVICE_IN_SPEAKER_MIC)) {
                 status = sess->setConfig(streamHandle, MODULE,  ORIENTATION_TAG);
                 if (0 != status) {
                     PAL_ERR(LOG_TAG, "setting HDR record orientation config failed with status %d", status);

@@ -2222,10 +2222,12 @@ int32_t BtA2dp::setDeviceParameter(uint32_t param_id, void *param)
             else
                 audio_sink_suspend();
         } else {
+            param_bt_a2dp.a2dp_capture_suspended = false;
+            if (a2dpState == A2DP_STATE_DISCONNECTED)
+                goto exit;
+
             if (clear_source_a2dpsuspend_flag)
                 clear_source_a2dpsuspend_flag();
-
-            param_bt_a2dp.a2dp_capture_suspended = false;
 
             if (totalActiveSessionRequests > 0) {
                 if (audio_sink_start_api) {
@@ -2489,7 +2491,7 @@ int32_t BtA2dp::checkDeviceStatus() {
 std::shared_ptr<Device> BtSco::objRx = nullptr;
 std::shared_ptr<Device> BtSco::objTx = nullptr;
 bool BtSco::isScoOn = false;
-bool BtSco::isWbSpeechEnabled = false;
+bool BtSco::isWbSpeechEnabled = true;
 int  BtSco::swbSpeechMode = SPEECH_MODE_INVALID;
 bool BtSco::isSwbLc3Enabled = false;
 audio_lc3_codec_cfg_t BtSco::lc3CodecInfo = {};
