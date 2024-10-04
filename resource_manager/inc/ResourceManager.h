@@ -68,6 +68,17 @@ typedef enum {
     TX_HOSTLESS,
 } hostless_dir_t;
 
+typedef enum {
+    MIC_OCC_STATE_NO_OCCLUSION = 0,
+    MIC_OCC_STATE_MIC1_BLOCKED,
+    MIC_OCC_STATE_MIC0_BLOCKED,
+} mic_occlusion_states_t;
+
+typedef enum {
+    PRIMARY_MIC = 0,
+    SECONDARY_MIC,
+};
+
 #define audio_mixer mixer
 #define MAX_SND_CARD 10
 #define DUMMY_SND_CARD MAX_SND_CARD
@@ -590,6 +601,7 @@ protected:
     static std::map<std::string, uint32_t> btFmtTable;
     static std::map<std::string, int> spkrPosTable;
     static std::map<int, std::string> spkrTempCtrlsMap;
+    std::unordered_map<Stream *, std::vector<pal_param_mic_occlusion_info_t>> micOcclusionInfoMap;
     static std::map<uint32_t, uint32_t> btSlimClockSrcMap;
     static std::vector<deviceIn> deviceInfo;
     static std::vector<tx_ecinfo> txEcInfo;
@@ -636,6 +648,7 @@ protected:
     std::shared_ptr<SignalHandler> mSigHandler;
     static std::vector<int> spViChannelMapCfg;
     std::map<int, bool> PCMDataInstances;
+    int getPcmIdByDevInfoName(char *mixer_str);
 public:
     ~ResourceManager();
     static bool mixerClosed;
@@ -746,6 +759,11 @@ public:
     static int AudioFeatureStatsGetInfo(void **afs_payload, size_t *afs_payload_size);
     void checkQVAAppPresence(afs_param_payload_t *payload);
     pal_param_payload *AFSWakeUpAlgoDetection();
+
+    /** Update mic occlusion info when event is detected */
+    int32_t updateMicOcclusionInfo(Stream* stream_hdl, void* data);
+    void addMicOcclusionInfo(Stream *s);
+    void removeMicOcclusionInfo(Stream *s);
 
     /* checks config for both stream and device */
     bool isStreamSupported(struct pal_stream_attributes *attributes,
