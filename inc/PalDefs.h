@@ -1313,7 +1313,7 @@ typedef struct pal_param_mic_occlusion_info {
  * Description : Used by PAL client to customize
  *               the device related information.
 */
-#define PAL_MAX_CUSTOM_KEY_SIZE 128
+#define PAL_MAX_CUSTOM_KEY_SIZE 256
 typedef struct pal_device_custom_config {
     char custom_key[PAL_MAX_CUSTOM_KEY_SIZE];
 } pal_device_custom_config_t;
