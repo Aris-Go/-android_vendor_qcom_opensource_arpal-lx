@@ -43,6 +43,33 @@
 #include <unistd.h>
 #include <chrono>
 
+std::condition_variable pauseCV;
+
+static void handleSessionCallBack(uint64_t hdl, uint32_t event_id, void *data,
+                                  uint32_t event_size)
+{
+    Stream *s = (Stream *) hdl;
+    std::shared_ptr<ResourceManager> rm = nullptr;
+    pal_device_id_t dev_id;
+
+    PAL_DBG(LOG_TAG,"Event id %x ", event_id);
+
+    rm = ResourceManager::getInstance();
+    if (!rm) {
+        PAL_ERR(LOG_TAG, "ResourceManager getInstance failed");
+        return;
+    }
+
+    if (event_id == EVENT_ID_SOFT_PAUSE_PAUSE_COMPLETE) {
+        PAL_DBG(LOG_TAG, "Pause done");
+        pauseCV.notify_all();
+    } else if (event_id == EVENT_ID_MIC_OCCLUSION_STATUS_INFO) {
+        PAL_DBG(LOG_TAG," Mic Occlusion info received");
+        // Notify Resource Manager to update the cache.
+        rm->updateMicOcclusionInfo(s, data);
+    }
+}
+
 StreamPCM::StreamPCM(const struct pal_stream_attributes *sattr, struct pal_device *dattr,
                     const uint32_t no_of_devices, const struct modifier_kv *modifiers,
                     const uint32_t no_of_modifiers, const std::shared_ptr<ResourceManager> rm)
@@ -177,10 +204,8 @@ StreamPCM::StreamPCM(const struct pal_stream_attributes *sattr, struct pal_devic
         dev = nullptr;
     }
 
-
-    // Register for Soft pause events
-    if (mStreamAttr->direction == PAL_AUDIO_OUTPUT )
-        session->registerCallBack(handleSoftPauseCallBack, (uint64_t)this);
+    // Register for session events
+    session->registerCallBack(handleSessionCallBack, (uint64_t)this);
 
     mStreamMutex.unlock();
     PAL_DBG(LOG_TAG, "Exit. state %d", currentState);
@@ -1190,7 +1215,12 @@ int32_t  StreamPCM::setParameters(uint32_t param_id, void *payload)
             if (NULL != session) {
                 /* To avoid pop while switching channels, it is required to mute
                    the playback first and then swap the channel and unmute */
-                setConfigStatus = session->setConfig(this, MODULE, DEVICEPP_MUTE);
+                if (mStreamAttr->type == PAL_STREAM_LOW_LATENCY ||
+                    mStreamAttr->type == PAL_STREAM_ULTRA_LOW_LATENCY) {
+                    setConfigStatus = session->setConfig(this, MODULE, MUTE_TAG);
+                } else {
+                    setConfigStatus = session->setConfig(this, MODULE, DEVICEPP_MUTE);
+                }
                 if (setConfigStatus) {
                     PAL_INFO(LOG_TAG, "DevicePP Mute failed");
                 }
@@ -1203,7 +1233,12 @@ int32_t  StreamPCM::setParameters(uint32_t param_id, void *payload)
                 mStreamMutex.unlock();
                 usleep(MUTE_RAMP_PERIOD); // Wait for channel swap to take affect
                 mStreamMutex.lock();
-                setConfigStatus = session->setConfig(this, MODULE, DEVICEPP_UNMUTE);
+                if (mStreamAttr->type == PAL_STREAM_LOW_LATENCY ||
+                    mStreamAttr->type == PAL_STREAM_ULTRA_LOW_LATENCY) {
+                    setConfigStatus = session->setConfig(this, MODULE, UNMUTE_TAG);
+                } else {
+                    setConfigStatus = session->setConfig(this, MODULE, DEVICEPP_UNMUTE);
+                }
                 if (setConfigStatus) {
                     PAL_INFO(LOG_TAG, "DevicePP Unmute failed");
                 }

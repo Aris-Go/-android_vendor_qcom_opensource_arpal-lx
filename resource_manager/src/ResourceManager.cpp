@@ -73,6 +73,7 @@
 #include "Handset.h"
 #include "SndCardMonitor.h"
 #include "UltrasoundDevice.h"
+#include "fluence_ffv_common_calibration.h"
 #include "ECRefDevice.h"
 #include "HapticsDev.h"
 #include "HapticsDevProtection.h"
@@ -153,6 +154,7 @@
 #define WAKE_LOCK_NAME "audio_pal_wl"
 #define WAKE_LOCK_PATH "/sys/power/wake_lock"
 #define WAKE_UNLOCK_PATH "/sys/power/wake_unlock"
+#define MAX_WAKE_LOCK_LENGTH 1024
 
 #define CLOCK_SRC_DEFAULT 1
 
@@ -834,6 +836,120 @@ void ResourceManager::sendCrashSignal(int signal, pid_t pid, uid_t uid)
     agm_dump(&dump_info);
 }
 
+void ResourceManager::addMicOcclusionInfo(Stream *s) {
+    std::vector<std::shared_ptr<Device>> palDevices;
+    struct pal_device dattr;
+    pal_device_id_t dev_id = PAL_DEVICE_NONE, id;
+    int status, i;
+
+    if (s == nullptr) {
+        PAL_ERR(LOG_TAG,"stream handle s is null");
+        return;
+    }
+
+    status = s->getPalDevices(palDevices);
+    if ((0 != status) || palDevices.empty()) {
+        PAL_ERR(LOG_TAG, "palDevices Failed or Empty");
+        return;
+    }
+
+    for (i = 0; i < palDevices.size(); i++) {
+        id = (pal_device_id_t)palDevices[i]->getSndDeviceId();
+        if (isInputDevId(id)) {
+            palDevices[i]->getDeviceAttributes(&dattr);
+            dev_id = id;
+            PAL_DBG(LOG_TAG," device = %d for mic map", dev_id);
+            break;
+        }
+    }
+
+    if (dev_id == PAL_DEVICE_NONE) {
+       PAL_ERR(LOG_TAG,"no input device found, can't add new entry in map");
+       return;
+    }
+
+    if (micOcclusionInfoMap.find(s) == micOcclusionInfoMap.end()) {
+        pal_param_mic_occlusion_info_t mic_info = {dev_id, false, 0, 0};
+        std::vector<pal_param_mic_occlusion_info_t> micInfoVector;
+
+        /*push mic info to vector for each mic (channel) */
+        for (i = 0; i < dattr.config.ch_info.channels; i++) {
+            micInfoVector.push_back(mic_info);
+        }
+
+        micOcclusionInfoMap[s]= micInfoVector;
+    }
+}
+
+void ResourceManager::removeMicOcclusionInfo(Stream *s)
+{
+    if (s == nullptr) {
+        PAL_ERR(LOG_TAG,"stream handle s is null");
+        return;
+    }
+
+    auto it = micOcclusionInfoMap.find(s);
+    if (it != micOcclusionInfoMap.end()) {
+        micOcclusionInfoMap.erase(it);
+    }
+}
+
+int32_t ResourceManager::updateMicOcclusionInfo(Stream *s, void *data)
+{
+    event_id_mic_occlusion_status_info_t *mic_info = nullptr;
+    uint16_t occlusionState, occludedMic;
+
+    PAL_DBG(LOG_TAG, "Enter %s", __func__);
+
+    mic_info = (struct event_id_mic_occlusion_status_info_t *)data;
+    occlusionState = mic_info->occlusion_state;
+
+    auto it = micOcclusionInfoMap.find(s);
+
+    if (it == micOcclusionInfoMap.end()) {
+        /*if didn't find entry, add new and update*/
+        addMicOcclusionInfo(s);
+    }
+
+    PAL_DBG(LOG_TAG," mic occ state: %d", occlusionState);
+
+    switch (occlusionState) {
+        case MIC_OCC_STATE_NO_OCCLUSION:
+            /* update all the occluded mics as recovered */
+            for (int i = 0; i < micOcclusionInfoMap[s].size(); i++) {
+                if (micOcclusionInfoMap[s][i].is_occluded) {
+                    micOcclusionInfoMap[s][i].is_occluded = false;
+                    micOcclusionInfoMap[s][i].num_of_recovery++;
+                }
+            }
+        break;
+        case MIC_OCC_STATE_MIC0_BLOCKED:
+        case MIC_OCC_STATE_MIC1_BLOCKED:
+            if (occlusionState == MIC_OCC_STATE_MIC0_BLOCKED)
+                occludedMic = PRIMARY_MIC;
+            else if (occlusionState == MIC_OCC_STATE_MIC1_BLOCKED)
+                occludedMic = SECONDARY_MIC;
+
+            /* one of them mics is occluded and other(s) are recovered,
+               update occlusion status for the mics accordingly*/
+            for (int i = 0; i < micOcclusionInfoMap[s].size(); i++) {
+                if (i == occludedMic) {
+                    micOcclusionInfoMap[s][i].is_occluded = true;
+                    micOcclusionInfoMap[s][i].num_of_occlusion++;
+                } else if (micOcclusionInfoMap[s][i].is_occluded) {
+                    micOcclusionInfoMap[s][i].is_occluded = false;
+                    micOcclusionInfoMap[s][i].num_of_recovery++;
+                }
+            }
+        break;
+        default:
+            PAL_DBG(LOG_TAG," Incorrect mic occ state: %d", occlusionState);
+    }
+
+    PAL_DBG(LOG_TAG, "Exit %s", __func__);
+    return 0;
+}
+
 ResourceManager::ResourceManager()
 {
     PAL_INFO(LOG_TAG, "Enter: %p", this);
@@ -1248,7 +1364,10 @@ void ResourceManager::loadAdmLib()
 
 int ResourceManager::initWakeLocks(void) {
 
-    wake_lock_fd = ::open(WAKE_LOCK_PATH, O_WRONLY|O_APPEND);
+    char buf[MAX_WAKE_LOCK_LENGTH] = {};
+    int size = 0, ret = 0;
+
+    wake_lock_fd = ::open(WAKE_LOCK_PATH, O_RDWR|O_APPEND);
     if (wake_lock_fd < 0) {
         PAL_ERR(LOG_TAG, "Unable to open %s, err:%s",
             WAKE_LOCK_PATH, strerror(errno));
@@ -1265,6 +1384,20 @@ int ResourceManager::initWakeLocks(void) {
         ::close(wake_lock_fd);
         wake_lock_fd = -1;
         return -EINVAL;
+    }
+
+    size = ::read(wake_lock_fd, buf, sizeof(buf) - 1);
+    buf[MAX_WAKE_LOCK_LENGTH - 1] = '\0';
+    if (size >= 0) {
+        if (strstr(buf, WAKE_LOCK_NAME)) {
+            PAL_INFO(LOG_TAG, "Clean up wake lock after restart");
+            ret = ::write(wake_unlock_fd, WAKE_LOCK_NAME, strlen(WAKE_LOCK_NAME));
+            if (ret < 0) {
+                PAL_ERR(LOG_TAG, "Failed to release wakelock %d %s",
+                    ret, strerror(errno));
+                return ret;
+            }
+        }
     }
     return 0;
 }
@@ -5236,6 +5369,35 @@ void ResourceManager::mixerEventWaitThreadLoop(
     mixer_subscribe_events(mixer, 0);
 }
 
+int ResourceManager::getPcmIdByDevInfoName(char *mixer_str) {
+    int pcm_id = 0;
+    std::string event_str(mixer_str);
+
+    if (!mixer_str) {
+        PAL_ERR(LOG_TAG,"empty mixer str");
+        return -EINVAL;
+    }
+
+    int idx = event_str.find(" ");
+    if (idx == std::string::npos) {
+        PAL_ERR(LOG_TAG,"space index not found");
+        return -EINVAL;
+    }
+
+    std::string event_name = event_str.substr(0,idx);
+
+    for (int i = 0; i < devInfo.size();i++) {
+        if (strcmp(event_name.c_str(), devInfo[i].name) == 0) {
+            pcm_id = devInfo[i].deviceId;
+            return pcm_id;
+        }
+    }
+
+    //not found.
+    PAL_ERR(LOG_TAG,"pcm id not found");
+    return -EINVAL;
+}
+
 int ResourceManager::handleMixerEvent(struct mixer *mixer, char *mixer_str) {
     int status = 0;
     int pcm_id = 0;
@@ -5245,6 +5407,7 @@ int ResourceManager::handleMixerEvent(struct mixer *mixer, char *mixer_str) {
     // TODO: hard code in common defs
     std::string pcm_prefix = "PCM";
     std::string compress_prefix = "COMPRESS";
+    std::string voice_prefix = "VOICEMMODE";
     std::string event_suffix = "event";
     size_t prefix_idx = 0;
     size_t suffix_idx = 0;
@@ -5294,9 +5457,20 @@ int ResourceManager::handleMixerEvent(struct mixer *mixer, char *mixer_str) {
     if (prefix_idx == event_str.npos) {
         prefix_idx = event_str.find(compress_prefix);
         if (prefix_idx == event_str.npos) {
-            PAL_ERR(LOG_TAG, "Invalid mixer event");
-            status = -EINVAL;
-            goto exit;
+            prefix_idx = event_str.find(voice_prefix);
+            if (prefix_idx == event_str.npos) {
+                PAL_ERR(LOG_TAG, "Invalid mixer event");
+                status = -EINVAL;
+                goto exit;
+            } else { /*find pcm_id for voice call case*/
+                pcm_id = getPcmIdByDevInfoName(mixer_str);
+                if (pcm_id < 0) {
+                    PAL_ERR(LOG_TAG, "Invalid mixer event");
+                    status = -EINVAL;
+                    goto exit;
+                }
+                goto acquire_cb;
+            }
         } else {
             prefix_idx += compress_prefix.length();
         }
@@ -5314,6 +5488,7 @@ int ResourceManager::handleMixerEvent(struct mixer *mixer, char *mixer_str) {
     length = suffix_idx - prefix_idx;
     pcm_id = std::stoi(event_str.substr(prefix_idx, length));
 
+acquire_cb:
     // acquire callback/cookie with pcm dev id
     it = mixerEventCallbackMap.find(pcm_id);
     if (it != mixerEventCallbackMap.end()) {
@@ -8122,11 +8297,6 @@ int32_t ResourceManager::streamDevSwitch(std::vector <std::tuple<Stream *, uint3
 
     PAL_INFO(LOG_TAG, "Enter");
 
-    if (PAL_CARD_STATUS_DOWN(cardState)) {
-        PAL_ERR(LOG_TAG, "Sound card is offline/standby");
-        status = -EINVAL;
-        goto exit_no_unlock;
-    }
     mActiveStreamMutex.lock();
 
     SortAndUnique(streamDevDisconnectList);
@@ -10615,6 +10785,19 @@ int ResourceManager::getParameter(uint32_t param_id, void **param_payload,
             PAL_VERBOSE(LOG_TAG, "get parameter for Proxy Record session");
             *payload_size = (isProxyRecordActive ? strlen("true") : strlen("false")) + 1;
             memcpy((char*)param_payload, isProxyRecordActive ? "true" : "false", *payload_size);
+        }
+        break;
+        case PAL_PARAM_ID_MIC_OCCLUSION_INFO:
+        {
+            PAL_INFO(LOG_TAG, "get parameter for Mic Occlusion Info");
+            auto micInfoVec = new std::vector<std::vector<pal_param_mic_occlusion_info_t>>;
+            for (const auto& it : micOcclusionInfoMap )
+            {
+                micInfoVec->push_back(it.second);
+            }
+
+        *payload_size = sizeof(micInfoVec);
+        *param_payload = static_cast<void*>(micInfoVec);
         }
         break;
         default:
