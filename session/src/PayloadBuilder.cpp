@@ -294,6 +294,8 @@ std::vector<allKVs> PayloadBuilder::all_streampps;
 std::vector<allKVs> PayloadBuilder::all_devices;
 std::vector<allKVs> PayloadBuilder::all_devicepps;
 
+uint32_t getSamplerateKv(uint32_t samplerate);
+
 template <typename T>
 void PayloadBuilder::populateChannelMixerCoeff(T pcmChannel, uint8_t numChannel,
                 int rotationType)
@@ -3355,6 +3357,59 @@ exit:
     PAL_DBG(LOG_TAG, "Exit, status %d", status);
     return status;
 }
+uint32_t getSamplerateKv(uint32_t samplerate)
+{
+    uint32_t value = 0;
+
+    switch (samplerate)
+    {
+        case 8000:
+            value = SAMPLINGRATE_8K;
+        break;
+        case 11025:
+            value = SAMPLINGRATE_11K;
+        break;
+        case 16000:
+            value = SAMPLINGRATE_16K;
+        break;
+        case 22050:
+            value = SAMPLINGRATE_22K;
+        break;
+        case 32000:
+            value = SAMPLINGRATE_32K;
+        break;
+        case 44100:
+            value = SAMPLINGRATE_44K;
+        break;
+        case 48000:
+            value = SAMPLINGRATE_48K;
+        break;
+        case 64000:
+            value = SAMPLINGRATE_64K;
+        break;
+        case 88200:
+            value = SAMPLINGRATE_88K;
+        break;
+        case 96000:
+            value = SAMPLINGRATE_96K;
+        break;
+        case 176400:
+            value = SAMPLINGRATE_176K;
+        break;
+        case 192000:
+            value = SAMPLINGRATE_192K;
+        break;
+        case 352800:
+            value = SAMPLINGRATE_352K;
+        break;
+        case 384000:
+            value = SAMPLINGRATE_384K;
+        break;
+        default:
+            break;
+    }
+    return value;
+}
 
 int PayloadBuilder::populateDevicePPCkv(Stream *s, std::vector <std::pair<int,int>> &keyVector)
 {
@@ -3364,6 +3419,7 @@ int PayloadBuilder::populateDevicePPCkv(Stream *s, std::vector <std::pair<int,in
     struct pal_device dAttr;
     std::shared_ptr<ResourceManager> rm = ResourceManager::getInstance();
     struct pal_device_info devInfo = {};
+    uint32_t sampleRateKv = 0;
 
     PAL_DBG(LOG_TAG,"Enter");
     sattr = new struct pal_stream_attributes;
@@ -3410,12 +3466,40 @@ int PayloadBuilder::populateDevicePPCkv(Stream *s, std::vector <std::pair<int,in
                                                    dAttr.config.ch_info.channels));
                 break;
             case PAL_STREAM_VOIP_RX:
-            case PAL_STREAM_VOIP_TX:
                 if ((devInfo.isUSBUUIdBasedTuningEnabledFlag) &&
                     (USB::isUsbConnected(dAttr.address))) {
                     keyVector.push_back(std::make_pair(USB_VENDOR_ID, USB::getVendorIdCkv()));
                 }
+                if ((dAttr.id != PAL_DEVICE_OUT_SPEAKER) &&
+                    (dAttr.id != PAL_DEVICE_OUT_HANDSET) &&
+                    (dAttr.id != PAL_DEVICE_OUT_WIRED_HEADSET) &&
+                    (dAttr.id != PAL_DEVICE_OUT_WIRED_HEADPHONE)&&
+                    (dAttr.id != PAL_DEVICE_OUT_USB_HEADSET) &&
+                    (dAttr.id != PAL_DEVICE_OUT_USB_DEVICE))
+                    break;
+
+                PAL_DBG(LOG_TAG,"VoiP_RX Sample Rate[%d]\n", dAttr.config.sample_rate);
+                 if ((sampleRateKv = getSamplerateKv(dAttr.config.sample_rate)) != 0)
+                    keyVector.push_back(std::make_pair(SAMPLINGRATE, sampleRateKv));
                 break;
+
+            case PAL_STREAM_VOIP_TX:
+            case PAL_STREAM_VOICE_RECOGNITION:
+               if ((devInfo.isUSBUUIdBasedTuningEnabledFlag) &&
+                    (USB::isUsbConnected(dAttr.address))) {
+                    keyVector.push_back(std::make_pair(USB_VENDOR_ID, USB::getVendorIdCkv()));
+            }
+                if ((dAttr.id != PAL_DEVICE_IN_SPEAKER_MIC) &&
+                    (dAttr.id != PAL_DEVICE_IN_HANDSET_MIC) &&
+                    (dAttr.id != PAL_DEVICE_IN_WIRED_HEADSET)&&
+                    (dAttr.id != PAL_DEVICE_IN_USB_HEADSET))
+                    break;
+
+                PAL_DBG(LOG_TAG,"stream type %d Sample Rate[%d]\n", sattr->type, dAttr.config.sample_rate);
+                if ((sampleRateKv = getSamplerateKv(dAttr.config.sample_rate)) != 0)
+                    keyVector.push_back(std::make_pair(SAMPLINGRATE, sampleRateKv));
+                break;
+
             case PAL_STREAM_LOW_LATENCY:
             case PAL_STREAM_DEEP_BUFFER:
             case PAL_STREAM_SPATIAL_AUDIO:
@@ -3449,6 +3533,20 @@ int PayloadBuilder::populateDevicePPCkv(Stream *s, std::vector <std::pair<int,in
                 if ((devInfo.isUSBUUIdBasedTuningEnabledFlag) &&
                     (USB::isUsbConnected(dAttr.address))) {
                     keyVector.push_back(std::make_pair(USB_VENDOR_ID, USB::getVendorIdCkv()));
+                }
+                if ((dAttr.id == PAL_DEVICE_OUT_SPEAKER) ||
+                    (dAttr.id == PAL_DEVICE_OUT_HANDSET) ||
+                    (dAttr.id == PAL_DEVICE_OUT_WIRED_HEADSET) ||
+                    (dAttr.id == PAL_DEVICE_OUT_WIRED_HEADPHONE) ||
+                    (dAttr.id == PAL_DEVICE_OUT_USB_HEADSET) ||
+                    (dAttr.id == PAL_DEVICE_OUT_USB_DEVICE) ||
+                    (dAttr.id == PAL_DEVICE_IN_SPEAKER_MIC) ||
+                    (dAttr.id == PAL_DEVICE_IN_HANDSET_MIC) ||
+                    (dAttr.id == PAL_DEVICE_IN_WIRED_HEADSET)||
+                    (dAttr.id == PAL_DEVICE_IN_USB_HEADSET)) {
+                    if ((sampleRateKv = getSamplerateKv(dAttr.config.sample_rate)) != 0)
+                        keyVector.push_back(std::make_pair(SAMPLINGRATE, sampleRateKv));
+                    PAL_DBG(LOG_TAG,"stream type %d Sample Rate[%d]\n", sattr->type, dAttr.config.sample_rate);
                 }
                 /* TBD: Push Channels for these types once Channels are added */
                 //keyVector.push_back(std::make_pair(CHANNELS,
