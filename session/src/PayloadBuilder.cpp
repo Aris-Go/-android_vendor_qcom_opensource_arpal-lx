@@ -107,6 +107,8 @@
 
 #define PARAM_ID_VOL_CTRL_MASTER_MUTE 0x08001036
 
+#define MAX_CRS_VOL_INDEX 7
+
 struct volume_ctrl_master_gain_t
 {
     uint16_t master_gain;
@@ -291,6 +293,8 @@ std::vector<allKVs> PayloadBuilder::all_streams;
 std::vector<allKVs> PayloadBuilder::all_streampps;
 std::vector<allKVs> PayloadBuilder::all_devices;
 std::vector<allKVs> PayloadBuilder::all_devicepps;
+
+uint32_t getSamplerateKv(uint32_t samplerate);
 
 template <typename T>
 void PayloadBuilder::populateChannelMixerCoeff(T pcmChannel, uint8_t numChannel,
@@ -3353,6 +3357,59 @@ exit:
     PAL_DBG(LOG_TAG, "Exit, status %d", status);
     return status;
 }
+uint32_t getSamplerateKv(uint32_t samplerate)
+{
+    uint32_t value = 0;
+
+    switch (samplerate)
+    {
+        case 8000:
+            value = SAMPLINGRATE_8K;
+        break;
+        case 11025:
+            value = SAMPLINGRATE_11K;
+        break;
+        case 16000:
+            value = SAMPLINGRATE_16K;
+        break;
+        case 22050:
+            value = SAMPLINGRATE_22K;
+        break;
+        case 32000:
+            value = SAMPLINGRATE_32K;
+        break;
+        case 44100:
+            value = SAMPLINGRATE_44K;
+        break;
+        case 48000:
+            value = SAMPLINGRATE_48K;
+        break;
+        case 64000:
+            value = SAMPLINGRATE_64K;
+        break;
+        case 88200:
+            value = SAMPLINGRATE_88K;
+        break;
+        case 96000:
+            value = SAMPLINGRATE_96K;
+        break;
+        case 176400:
+            value = SAMPLINGRATE_176K;
+        break;
+        case 192000:
+            value = SAMPLINGRATE_192K;
+        break;
+        case 352800:
+            value = SAMPLINGRATE_352K;
+        break;
+        case 384000:
+            value = SAMPLINGRATE_384K;
+        break;
+        default:
+            break;
+    }
+    return value;
+}
 
 int PayloadBuilder::populateDevicePPCkv(Stream *s, std::vector <std::pair<int,int>> &keyVector)
 {
@@ -3362,6 +3419,7 @@ int PayloadBuilder::populateDevicePPCkv(Stream *s, std::vector <std::pair<int,in
     struct pal_device dAttr;
     std::shared_ptr<ResourceManager> rm = ResourceManager::getInstance();
     struct pal_device_info devInfo = {};
+    uint32_t sampleRateKv = 0;
 
     PAL_DBG(LOG_TAG,"Enter");
     sattr = new struct pal_stream_attributes;
@@ -3408,12 +3466,40 @@ int PayloadBuilder::populateDevicePPCkv(Stream *s, std::vector <std::pair<int,in
                                                    dAttr.config.ch_info.channels));
                 break;
             case PAL_STREAM_VOIP_RX:
-            case PAL_STREAM_VOIP_TX:
                 if ((devInfo.isUSBUUIdBasedTuningEnabledFlag) &&
                     (USB::isUsbConnected(dAttr.address))) {
                     keyVector.push_back(std::make_pair(USB_VENDOR_ID, USB::getVendorIdCkv()));
                 }
+                if ((dAttr.id != PAL_DEVICE_OUT_SPEAKER) &&
+                    (dAttr.id != PAL_DEVICE_OUT_HANDSET) &&
+                    (dAttr.id != PAL_DEVICE_OUT_WIRED_HEADSET) &&
+                    (dAttr.id != PAL_DEVICE_OUT_WIRED_HEADPHONE)&&
+                    (dAttr.id != PAL_DEVICE_OUT_USB_HEADSET) &&
+                    (dAttr.id != PAL_DEVICE_OUT_USB_DEVICE))
+                    break;
+
+                PAL_DBG(LOG_TAG,"VoiP_RX Sample Rate[%d]\n", dAttr.config.sample_rate);
+                 if ((sampleRateKv = getSamplerateKv(dAttr.config.sample_rate)) != 0)
+                    keyVector.push_back(std::make_pair(SAMPLINGRATE, sampleRateKv));
                 break;
+
+            case PAL_STREAM_VOIP_TX:
+            case PAL_STREAM_VOICE_RECOGNITION:
+               if ((devInfo.isUSBUUIdBasedTuningEnabledFlag) &&
+                    (USB::isUsbConnected(dAttr.address))) {
+                    keyVector.push_back(std::make_pair(USB_VENDOR_ID, USB::getVendorIdCkv()));
+            }
+                if ((dAttr.id != PAL_DEVICE_IN_SPEAKER_MIC) &&
+                    (dAttr.id != PAL_DEVICE_IN_HANDSET_MIC) &&
+                    (dAttr.id != PAL_DEVICE_IN_WIRED_HEADSET)&&
+                    (dAttr.id != PAL_DEVICE_IN_USB_HEADSET))
+                    break;
+
+                PAL_DBG(LOG_TAG,"stream type %d Sample Rate[%d]\n", sattr->type, dAttr.config.sample_rate);
+                if ((sampleRateKv = getSamplerateKv(dAttr.config.sample_rate)) != 0)
+                    keyVector.push_back(std::make_pair(SAMPLINGRATE, sampleRateKv));
+                break;
+
             case PAL_STREAM_LOW_LATENCY:
             case PAL_STREAM_DEEP_BUFFER:
             case PAL_STREAM_SPATIAL_AUDIO:
@@ -3447,6 +3533,20 @@ int PayloadBuilder::populateDevicePPCkv(Stream *s, std::vector <std::pair<int,in
                 if ((devInfo.isUSBUUIdBasedTuningEnabledFlag) &&
                     (USB::isUsbConnected(dAttr.address))) {
                     keyVector.push_back(std::make_pair(USB_VENDOR_ID, USB::getVendorIdCkv()));
+                }
+                if ((dAttr.id == PAL_DEVICE_OUT_SPEAKER) ||
+                    (dAttr.id == PAL_DEVICE_OUT_HANDSET) ||
+                    (dAttr.id == PAL_DEVICE_OUT_WIRED_HEADSET) ||
+                    (dAttr.id == PAL_DEVICE_OUT_WIRED_HEADPHONE) ||
+                    (dAttr.id == PAL_DEVICE_OUT_USB_HEADSET) ||
+                    (dAttr.id == PAL_DEVICE_OUT_USB_DEVICE) ||
+                    (dAttr.id == PAL_DEVICE_IN_SPEAKER_MIC) ||
+                    (dAttr.id == PAL_DEVICE_IN_HANDSET_MIC) ||
+                    (dAttr.id == PAL_DEVICE_IN_WIRED_HEADSET)||
+                    (dAttr.id == PAL_DEVICE_IN_USB_HEADSET)) {
+                    if ((sampleRateKv = getSamplerateKv(dAttr.config.sample_rate)) != 0)
+                        keyVector.push_back(std::make_pair(SAMPLINGRATE, sampleRateKv));
+                    PAL_DBG(LOG_TAG,"stream type %d Sample Rate[%d]\n", sattr->type, dAttr.config.sample_rate);
                 }
                 /* TBD: Push Channels for these types once Channels are added */
                 //keyVector.push_back(std::make_pair(CHANNELS,
@@ -3701,6 +3801,10 @@ int PayloadBuilder::populateTagKeyVector(Stream *s, std::vector <std::pair<int,i
     int status = 0;
     PAL_VERBOSE(LOG_TAG,"enter, tag 0x%x", tag);
     struct pal_stream_attributes sAttr;
+    struct pal_volume_data *voldata = NULL;
+    int voldB = 0;
+    float vol = 0.0f;
+    int vol_index = 0;
 
     memset(&sAttr, 0, sizeof(struct pal_stream_attributes));
     status = s->getStreamAttributes(&sAttr);
@@ -3711,6 +3815,57 @@ int PayloadBuilder::populateTagKeyVector(Stream *s, std::vector <std::pair<int,i
     }
 
     switch (tag) {
+    case CRS_CALL_VOLUME:
+       voldata = (struct pal_volume_data *)calloc(1, (sizeof(uint32_t) +
+                         (sizeof(struct pal_channel_vol_kv) * (0xFFFF))));
+       if (!voldata) {
+           status = -ENOMEM;
+           break;
+       }
+       status = s->getVolumeData(voldata);
+       if (0 != status) {
+           PAL_ERR(LOG_TAG,"getVolumeData Failed \n");
+           goto free_vol;
+       }
+       if (voldata->no_of_volpair == 1) {
+            vol = (voldata->volume_pair[0].vol);
+            PAL_VERBOSE(LOG_TAG,"volume sent:%f \n",(voldata->volume_pair[0].vol));
+        }
+       /*get crs volume index*/
+        voldB = lrint(vol * 10.0);
+        vol_index = MAX_CRS_VOL_INDEX - voldB;;
+
+        if (vol_index >= 0 && vol_index < 1) {
+            tkv.push_back(std::make_pair(VOLUME,LEVEL_0));
+        }
+        else if (vol_index >= 1 && vol_index < 2) {
+            tkv.push_back(std::make_pair(VOLUME,LEVEL_1));
+        }
+        else if (vol_index >= 2 && vol_index < 3) {
+            tkv.push_back(std::make_pair(VOLUME,LEVEL_2));
+        }
+        else if (vol_index >= 3 && vol_index < 4) {
+            tkv.push_back(std::make_pair(VOLUME,LEVEL_3));
+        }
+        else if (vol_index >= 4 && vol_index < 5) {
+            tkv.push_back(std::make_pair(VOLUME,LEVEL_4));
+        }
+        else if (vol_index >= 5 && vol_index < 6) {
+            tkv.push_back(std::make_pair(VOLUME,LEVEL_5));
+        }
+        else if (vol_index >= 6 && vol_index < 7) {
+            tkv.push_back(std::make_pair(VOLUME,LEVEL_6));
+        }
+        else if (vol_index >= 7) {
+            tkv.push_back(std::make_pair(VOLUME,LEVEL_7));
+        }
+        else {
+            //Sending LEVEL_4 in default case.
+            PAL_INFO(LOG_TAG, "Setting default volume tkv as LEVEL_4");
+            tkv.push_back(std::make_pair(VOLUME,LEVEL_4));
+        }
+        *gsltag = TAG_STREAM_VOLUME;
+        break;
     case MUTE_TAG:
        tkv.push_back(std::make_pair(MUTE,ON));
        *gsltag = TAG_MUTE;
@@ -3915,6 +4070,9 @@ int PayloadBuilder::populateTagKeyVector(Stream *s, std::vector <std::pair<int,i
     }
 
     PAL_VERBOSE(LOG_TAG,"exit status- %d", status);
+free_vol:
+    if (voldata)
+        free(voldata);
     return status;
 }
 

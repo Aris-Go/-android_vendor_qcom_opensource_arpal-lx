@@ -245,6 +245,20 @@ int SessionAlsaPcm::open(Stream * s)
                 PAL_ERR(LOG_TAG, "session alsa open failed with %d", status);
                 rm->freeFrontEndIds(pcmDevIds, sAttr, ldir);
                 frontEndIdAllocated = false;
+            } else {
+                // Register for  mixer event callback for mic occlusion.
+                status = rm->registerMixerEventCallback(pcmDevIds, sessionCb,
+                        cbCookie, true);
+                if (status == 0) {
+                    PAL_DBG(LOG_TAG, "register mixer event callback is SUCCESS");
+                    isMixerEventCbRegd = true;
+                } else {
+                 // Not a fatal error
+                    PAL_ERR(LOG_TAG, "Failed to register callback to mixer event");
+                 // If registration fails for this then mic occlusion
+                 // can't be notified to client.
+                    status = 0;
+                }
             }
             break;
         case PAL_AUDIO_OUTPUT:
@@ -923,7 +937,119 @@ void SessionAlsaPcm::releaseAdmFocus(Stream *s)
     if (rm->admAbandonFocusFn)
         rm->admAbandonFocusFn(rm->admData, static_cast<void *>(s));
 }
+int SessionAlsaPcm::populateECMFCPayload(Stream *s, size_t *payloadSize, uint8_t **payload)
+{
+    int status = 0;
+    uint32_t miid;
+    std::vector<std::shared_ptr<Device>> associatedDevices;
+    struct pal_device dAttr = {};
+    struct sessionToPayloadParam streamData = {};
 
+    status = SessionAlsaUtils::getModuleInstanceId(mixer, pcmDevIds.at(0),
+                                txAifBackEnds[0].second.data(), TAG_DEVICEPP_EC_MFC, &miid);
+    if (status != 0) {
+        PAL_ERR(LOG_TAG,"getModuleInstanceId failed\n");
+        goto exit;
+    }
+
+    PAL_INFO(LOG_TAG, "miid : %x id = %d\n", miid, pcmDevIds.at(0));
+    status = s->getAssociatedDevices(associatedDevices);
+    if (0 != status) {
+        PAL_ERR(LOG_TAG,"getAssociatedDevices Failed\n");
+        goto exit;
+    }
+
+    for (int i = 0; i < associatedDevices.size();i++) {
+        status = associatedDevices[i]->getDeviceAttributes(&dAttr);
+        if (0 != status) {
+            PAL_ERR(LOG_TAG,"get Device Attributes Failed\n");
+            goto exit;
+        }
+
+        if ((dAttr.id == PAL_DEVICE_IN_BLUETOOTH_A2DP) ||
+         (dAttr.id == PAL_DEVICE_IN_BLUETOOTH_BLE) ||
+                (dAttr.id == PAL_DEVICE_IN_BLUETOOTH_SCO_HEADSET)) {
+            struct pal_media_config codecConfig;
+            status = associatedDevices[i]->getCodecConfig(&codecConfig);
+            if (0 != status) {
+                PAL_ERR(LOG_TAG, "getCodecConfig Failed \n");
+                goto exit;
+            }
+            streamData.sampleRate = codecConfig.sample_rate;
+            streamData.bitWidth   = AUDIO_BIT_WIDTH_DEFAULT_16;
+            streamData.numChannel = 0xFFFF;
+        }else if ((dAttr.id == PAL_DEVICE_IN_USB_DEVICE) ||
+                (dAttr.id == PAL_DEVICE_IN_USB_HEADSET)) {
+            streamData.sampleRate = (dAttr.config.sample_rate % SAMPLINGRATE_8K == 0 &&
+                                    dAttr.config.sample_rate <= SAMPLINGRATE_48K) ?
+                                    dAttr.config.sample_rate : SAMPLINGRATE_48K;
+            streamData.bitWidth= AUDIO_BIT_WIDTH_DEFAULT_16;
+        }else {
+            streamData.sampleRate = dAttr.config.sample_rate;
+            streamData.bitWidth   = AUDIO_BIT_WIDTH_DEFAULT_16;
+            streamData.numChannel = 0xFFFF;
+        }
+
+        builder->payloadMFCConfig(payload, payloadSize, miid, &streamData);
+        if (payloadSize && payload) {
+            status = updateCustomPayload(*payload, *payloadSize);
+            freeCustomPayload(payload, payloadSize);
+            if (0 != status) {
+                PAL_ERR(LOG_TAG,"updateCustomPayload Failed\n");
+                goto exit;
+            }
+
+        }
+    }
+
+    status = SessionAlsaUtils::getModuleInstanceId(mixer, pcmDevIds.at(0),
+                txAifBackEnds[0].second.data(), DEVICE_MFC, &miid);
+    if (status != 0) {
+        PAL_ERR(LOG_TAG,"getModuleInstanceId failed\n");
+        goto exit;
+       }
+
+    PAL_INFO(LOG_TAG, "miid : %x id = %d\n", miid, pcmDevIds.at(0));
+    status = s->getAssociatedDevices(associatedDevices);
+    if (0 != status) {
+        PAL_ERR(LOG_TAG,"getAssociatedDevices Failed\n");
+        goto exit;
+    }
+    for (int i = 0; i < associatedDevices.size();i++) {
+        status = associatedDevices[i]->getDeviceAttributes(&dAttr);
+        if (0 != status) {
+            PAL_ERR(LOG_TAG,"get Device Attributes Failed\n");
+            goto exit;
+        }
+
+        if (dAttr.id == PAL_DEVICE_IN_USB_DEVICE || dAttr.id == PAL_DEVICE_IN_USB_HEADSET) {
+            streamData.sampleRate = (dAttr.config.sample_rate % SAMPLINGRATE_8K == 0 &&
+                        dAttr.config.sample_rate <= SAMPLINGRATE_48K) ?
+                        dAttr.config.sample_rate : SAMPLINGRATE_48K;
+            streamData.bitWidth   = AUDIO_BIT_WIDTH_DEFAULT_16;
+            streamData.numChannel = 0xFFFF;
+        } else {
+            streamData.sampleRate = dAttr.config.sample_rate;
+            streamData.bitWidth   = AUDIO_BIT_WIDTH_DEFAULT_16;
+            streamData.numChannel = 0xFFFF;
+        }
+
+        builder->payloadMFCConfig(payload, payloadSize, miid, &streamData);
+
+        if (payloadSize && payload) {
+            status = updateCustomPayload(*payload, *payloadSize);
+            freeCustomPayload(payload, payloadSize);
+            if (0 != status) {
+                PAL_ERR(LOG_TAG,"updateCustomPayload Failed\n");
+                goto exit;
+            }
+
+        }
+    }
+
+exit:
+    return status;
+}
 int SessionAlsaPcm::start(Stream * s)
 {
     struct pcm_config config = {};
@@ -1200,50 +1326,14 @@ int SessionAlsaPcm::start(Stream * s)
                     }
                 }
 
-                if (sAttr.type == PAL_STREAM_VOIP_TX) {
-                    status = SessionAlsaUtils::getModuleInstanceId(mixer, pcmDevIds.at(0),
-                                               txAifBackEnds[0].second.data(), TAG_DEVICEPP_EC_MFC, &miid);
+                if((sAttr.type == PAL_STREAM_VOIP_TX)||
+                    ((sAttr.type == PAL_STREAM_DEEP_BUFFER) &&
+                    (sAttr.direction == PAL_AUDIO_INPUT))){
+                    status = populateECMFCPayload(s, &payloadSize, &payload);
                     if (status != 0) {
-                        PAL_ERR(LOG_TAG,"getModuleInstanceId failed\n");
+                        PAL_ERR(LOG_TAG, "populate EC MFC payload failed");
                         goto set_mixer;
                     }
-                    PAL_INFO(LOG_TAG, "miid : %x id = %d\n", miid, pcmDevIds.at(0));
-                    status = s->getAssociatedDevices(associatedDevices);
-                    if (0 != status) {
-                        PAL_ERR(LOG_TAG,"getAssociatedDevices Failed\n");
-                        goto set_mixer;
-                    }
-                    for (int i = 0; i < associatedDevices.size();i++) {
-                        status = associatedDevices[i]->getDeviceAttributes(&dAttr);
-                        if (0 != status) {
-                            PAL_ERR(LOG_TAG,"get Device Attributes Failed\n");
-                            goto set_mixer;
-                        }
-                        if ((dAttr.id == PAL_DEVICE_IN_BLUETOOTH_A2DP) ||
-                            (dAttr.id == PAL_DEVICE_IN_BLUETOOTH_BLE) ||
-                            (dAttr.id == PAL_DEVICE_IN_BLUETOOTH_SCO_HEADSET)) {
-                            struct pal_media_config codecConfig;
-                            status = associatedDevices[i]->getCodecConfig(&codecConfig);
-                            if (0 != status) {
-                                PAL_ERR(LOG_TAG, "getCodecConfig Failed \n");
-                                goto set_mixer;
-                            }
-                            streamData.sampleRate = codecConfig.sample_rate;
-                            streamData.bitWidth   = AUDIO_BIT_WIDTH_DEFAULT_16;
-                            streamData.numChannel = 0xFFFF;
-                        } else if (dAttr.id == PAL_DEVICE_IN_USB_DEVICE ||
-                                   dAttr.id == PAL_DEVICE_IN_USB_HEADSET) {
-                            streamData.sampleRate = (dAttr.config.sample_rate % SAMPLINGRATE_8K == 0 &&
-                                                     dAttr.config.sample_rate <= SAMPLINGRATE_48K) ?
-                                                     dAttr.config.sample_rate : SAMPLINGRATE_48K;
-                            streamData.bitWidth   = AUDIO_BIT_WIDTH_DEFAULT_16;
-                            streamData.numChannel = 0xFFFF;
-                        } else {
-                            streamData.sampleRate = dAttr.config.sample_rate;
-                            streamData.bitWidth   = AUDIO_BIT_WIDTH_DEFAULT_16;
-                            streamData.numChannel = 0xFFFF;
-                        }
-                        builder->payloadMFCConfig(&payload, &payloadSize, miid, &streamData);
                         if (payloadSize && payload) {
                             status = updateCustomPayload(payload, payloadSize);
                             freeCustomPayload(&payload, &payloadSize);
@@ -1253,48 +1343,7 @@ int SessionAlsaPcm::start(Stream * s)
                             }
                         }
                     }
-                }
-                if (sAttr.type == PAL_STREAM_VOIP_TX) {
-                    status = SessionAlsaUtils::getModuleInstanceId(mixer, pcmDevIds.at(0),
-                                               txAifBackEnds[0].second.data(), DEVICE_MFC, &miid);
-                    if (status != 0) {
-                        PAL_ERR(LOG_TAG,"getModuleInstanceId failed\n");
-                        goto configure_pspfmfc;
-                    }
-                    PAL_INFO(LOG_TAG, "miid : %x id = %d\n", miid, pcmDevIds.at(0));
-                    status = s->getAssociatedDevices(associatedDevices);
-                    if (0 != status) {
-                        PAL_ERR(LOG_TAG,"getAssociatedDevices Failed\n");
-                        goto set_mixer;
-                    }
-                    for (int i = 0; i < associatedDevices.size();i++) {
-                        status = associatedDevices[i]->getDeviceAttributes(&dAttr);
-                        if (0 != status) {
-                            PAL_ERR(LOG_TAG,"get Device Attributes Failed\n");
-                            goto set_mixer;
-                        }
-                        if (dAttr.id == PAL_DEVICE_IN_USB_DEVICE || dAttr.id == PAL_DEVICE_IN_USB_HEADSET) {
-                            streamData.sampleRate = (dAttr.config.sample_rate % SAMPLINGRATE_8K == 0 &&
-                                                     dAttr.config.sample_rate <= SAMPLINGRATE_48K) ?
-                                                     dAttr.config.sample_rate : SAMPLINGRATE_48K;
-                            streamData.bitWidth   = AUDIO_BIT_WIDTH_DEFAULT_16;
-                            streamData.numChannel = 0xFFFF;
-                        } else {
-                            streamData.sampleRate = dAttr.config.sample_rate;
-                            streamData.bitWidth   = AUDIO_BIT_WIDTH_DEFAULT_16;
-                            streamData.numChannel = 0xFFFF;
-                        }
-                        builder->payloadMFCConfig(&payload, &payloadSize, miid, &streamData);
-                        if (payloadSize && payload) {
-                            status = updateCustomPayload(payload, payloadSize);
-                            freeCustomPayload(&payload, &payloadSize);
-                            if (0 != status) {
-                                PAL_ERR(LOG_TAG,"updateCustomPayload Failed\n");
-                                goto set_mixer;
-                            }
-                        }
-                    }
-                }
+
 
 configure_pspfmfc:
                 status = s->getAssociatedDevices(associatedDevices);
@@ -1490,6 +1539,36 @@ set_mixer:
                     status = errno;
                     PAL_ERR(LOG_TAG, "pcm_start failed %d", status);
                     goto exit;
+                }
+            }
+
+            if (!status && isMixerEventCbRegd) {
+                // Register for callback for Mic Occlusion Notification
+                size_t payload_size = 0;
+                struct agm_event_reg_cfg event_cfg;
+                payload_size = sizeof(struct agm_event_reg_cfg);
+                memset(&event_cfg, 0, sizeof(event_cfg));
+                event_cfg.event_id = EVENT_ID_MIC_OCCLUSION_STATUS_INFO;
+                event_cfg.event_config_payload_size = 0;
+                event_cfg.is_register = 1;
+                if(!pcmDevIds.size()) {
+                    PAL_ERR(LOG_TAG,"pcmDevIds not found ");
+                    goto exit;
+                }
+
+                if (!txAifBackEnds.empty())
+                    status = SessionAlsaUtils::registerMixerEvent(mixer,
+                                    pcmDevIds.at(0), txAifBackEnds[0].second.data(),
+                                    TAG_MODULE_MIC_OCCLUSION_DET,
+                                    (void *)&event_cfg, payload_size);
+                if (status == 0) {
+                    PAL_DBG(LOG_TAG, "micOcclusion EventCallback Registration is SUCCESS!");
+                    isMicOcclusionRegistrationDone = true;
+                    rm->addMicOcclusionInfo(s);
+                } else {
+                    // Not a fatal error
+                    PAL_ERR(LOG_TAG, " Mic Occlusion callback registration is failed %d", status);
+                    status = 0;
                 }
             }
             break;
@@ -1761,10 +1840,7 @@ set_mixer:
                 }
             }
 pcm_start:
-            status = setInitialVolume();
-            if (status != 0) {
-                PAL_ERR(LOG_TAG, "setVolume failed");
-            }
+            setInitialVolume();
             memset(&lpm_info, 0, sizeof(struct disable_lpm_info));
             rm->getDisableLpmInfo(&lpm_info);
             isStreamAvail = (find(lpm_info.streams_.begin(),
@@ -1890,7 +1966,7 @@ pcm_start:
            break;
     }
     if (sAttr.direction != PAL_AUDIO_OUTPUT) {
-        status = setInitialVolume();
+        setInitialVolume();
     }
     mState = SESSION_STARTED;
 
@@ -1931,6 +2007,29 @@ int SessionAlsaPcm::stop(Stream * s)
                 status = rm->getAudioRoute(&audioRoute);
                 if (!status)
                     audio_route_reset_and_update_path(audioRoute, "lpi-pcm-logging");
+            }
+
+            // Deregister for callback for Mic Occlusion
+            if (!status && isMicOcclusionRegistrationDone) {
+                payload_size = sizeof(struct agm_event_reg_cfg);
+                memset(&event_cfg, 0, sizeof(event_cfg));
+                event_cfg.event_id = EVENT_ID_MIC_OCCLUSION_STATUS_INFO;
+                event_cfg.event_config_payload_size = 0;
+                event_cfg.is_register = 0;
+                if (!pcmDevIds.size()) {
+                    PAL_ERR(LOG_TAG, "frontendIDs are not available");
+                    status = -EINVAL;
+                    goto exit;
+                }
+                SessionAlsaUtils::registerMixerEvent(
+                    mixer, pcmDevIds.at(0), txAifBackEnds[0].second.data(),
+                        TAG_MODULE_MIC_OCCLUSION_DET, (void *)&event_cfg, payload_size);
+
+                /* mark registration done irrespective of whether de-register
+                 * is successful or not and clear the cache. As we need to
+                 * re-register when new graph is opened.*/
+                rm->removeMicOcclusionInfo(s);
+                isMicOcclusionRegistrationDone = false;
             }
         break;
         case PAL_AUDIO_OUTPUT:
@@ -2086,6 +2185,7 @@ int SessionAlsaPcm::close(Stream * s)
     std::vector<int> pcmId;
     struct disable_lpm_info lpm_info;
     bool isStreamAvail = false;
+    int devCount = 0;
 
     PAL_DBG(LOG_TAG, "Enter");
     if (!frontEndIdAllocated) {
@@ -2140,6 +2240,18 @@ int SessionAlsaPcm::close(Stream * s)
                 sAttr.type == PAL_STREAM_SENSOR_PCM_DATA)
                 ldir = TX_HOSTLESS;
 
+            // Deregister callback for Mixer Event
+            if (!status && isMixerEventCbRegd) {
+                status = rm->registerMixerEventCallback(pcmDevIds,
+                    sessionCb, cbCookie, false);
+                if (status == 0) {
+                    isMixerEventCbRegd = false;
+                } else {
+                    // Not a fatal error
+                    PAL_ERR(LOG_TAG, "Failed to deregister callback to rm");
+                    status = 0;
+                }
+            }
             rm->freeFrontEndIds(pcmDevIds, sAttr, ldir);
             pcm = NULL;
             break;
@@ -2148,7 +2260,11 @@ int SessionAlsaPcm::close(Stream * s)
                 beDevId = dev->getSndDeviceId();
                 rm->getBackendName(beDevId, backendname);
                 PAL_DBG(LOG_TAG, "backendname %s", backendname.c_str());
-                if (dev->getDeviceCount() > 1) {
+                devCount = dev->getDeviceCount();
+                // Do not clear device metadata for A2DP device if SCO device is active
+                if ((devCount == 1) && rm->isBtA2dpDevice((pal_device_id_t) beDevId))
+                    devCount += SessionAlsaUtils::getScoDevCount();
+                if (devCount > 1) {
                     PAL_DBG(LOG_TAG, "Rx dev still active");
                     freeDeviceMetadata.push_back(std::make_pair(backendname, 0));
                 } else {
@@ -2299,6 +2415,11 @@ int SessionAlsaPcm::disconnectSessionDevice(Stream *streamHandle,
     std::vector<std::pair<int32_t, std::string>> rxAifBackEndsToDisconnect;
     std::vector<std::pair<int32_t, std::string>> txAifBackEndsToDisconnect;
     int32_t status = 0;
+    struct agm_event_reg_cfg event_cfg;
+    int payload_size = 0;
+    uint8_t *payload = NULL;
+    size_t payloadSize = 0;
+    struct pal_stream_attributes sAttr;
 
     deviceList.push_back(deviceToDisconnect);
     rm->getBackEndNames(deviceList, rxAifBackEndsToDisconnect,
@@ -2341,6 +2462,26 @@ int SessionAlsaPcm::disconnectSessionDevice(Stream *streamHandle,
     }
     if (!txAifBackEndsToDisconnect.empty()) {
         int cnt = 0;
+            // Deregister for callback for Mic Occlusion during device switch
+            if (!status && isMicOcclusionRegistrationDone) {
+                payload_size = sizeof(struct agm_event_reg_cfg);
+                memset(&event_cfg, 0, sizeof(event_cfg));
+                event_cfg.event_id = EVENT_ID_MIC_OCCLUSION_STATUS_INFO;
+                event_cfg.event_config_payload_size = 0;
+                event_cfg.is_register = 0;
+                if (!pcmDevIds.size()) {
+                    PAL_ERR(LOG_TAG, "frontendIDs are not available");
+                    status = -EINVAL;
+                    goto disconnectTxBE;
+                }
+                SessionAlsaUtils::registerMixerEvent(
+                    mixer, pcmDevIds.at(0), txAifBackEnds[0].second.data(),
+                        TAG_MODULE_MIC_OCCLUSION_DET, (void *)&event_cfg, payload_size);
+
+                isMicOcclusionRegistrationDone = false;
+                rm->removeMicOcclusionInfo(streamHandle);
+            }
+disconnectTxBE:
         if (streamType != PAL_STREAM_LOOPBACK)
             status = SessionAlsaUtils::disconnectSessionDevice(streamHandle, streamType, rm,
                      dAttr, (pcmDevIds.size() ? pcmDevIds : pcmDevTxIds), txAifBackEndsToDisconnect);
@@ -2362,7 +2503,32 @@ int SessionAlsaPcm::disconnectSessionDevice(Stream *streamHandle,
             }
         }
     }
+    if ((streamType == PAL_STREAM_VOIP_TX)||
+        ((streamType == PAL_STREAM_DEEP_BUFFER) &&
+        (sAttr.direction == PAL_AUDIO_INPUT))) {
+        status = streamHandle->getStreamAttributes(&sAttr);
+        if (status != 0) {
+            PAL_ERR(LOG_TAG, "stream get attributes failed");
+            goto exit;
+        }
+        status = populateECMFCPayload(streamHandle, &payloadSize, &payload);
+        if (status != 0) {
+            PAL_ERR(LOG_TAG, "Failed to populate EC MFC Payload");
+            status = 0;
+            goto exit;
+}
+        if (payloadSize && payload) {
+            status = SessionAlsaUtils::setMixerParameter(mixer, pcmDevIds.at(0), payload, payloadSize);
+            freeCustomPayload(&payload, &payloadSize);
+            if (status != 0) {
+                PAL_ERR(LOG_TAG, "Failed to set ecref mfc payload");
+                status = 0;
+                goto exit;
+            }
+        }
+    }
 
+exit:
     return status;
 }
 
@@ -2460,8 +2626,39 @@ int SessionAlsaPcm::connectSessionDevice(Stream* streamHandle, pal_stream_type_t
                 }
             }
         }
+
+        /* Re-register for the new device during device switch.*/
+        if (!status && isMixerEventCbRegd) {
+            // Register for callback for Mic Occlusion Notification
+            size_t payload_size = 0;
+            struct agm_event_reg_cfg event_cfg;
+            payload_size = sizeof(struct agm_event_reg_cfg);
+            memset(&event_cfg, 0, sizeof(event_cfg));
+            event_cfg.event_id = EVENT_ID_MIC_OCCLUSION_STATUS_INFO;
+            event_cfg.event_config_payload_size = 0;
+            event_cfg.is_register = 1;
+            if(!pcmDevIds.size()) {
+                PAL_ERR(LOG_TAG," pcmDevIds not found");
+                goto exit;
+            }
+            status = SessionAlsaUtils::registerMixerEvent(mixer,
+                                    pcmDevIds.at(0),
+                                    txAifBackEnds[0].second.data(),
+                                    TAG_MODULE_MIC_OCCLUSION_DET,
+                                    (void *)&event_cfg, payload_size);
+            if (status == 0) {
+                 PAL_DBG(LOG_TAG, "for micOcclusionEvent callback registration is SUCCESS");
+                 isMicOcclusionRegistrationDone = true;
+                 rm->addMicOcclusionInfo(streamHandle);
+            } else {
+                // Not a fatal error
+                PAL_ERR(LOG_TAG, "Mic Occlusion callback registration is failed %d", status);
+                status = 0;
+            }
+        }
     }
 
+exit:
     return status;
 }
 
@@ -3873,7 +4070,12 @@ void SessionAlsaPcm::retryOpenWithoutEC(Stream *s, unsigned int pcm_flags, struc
 
      status = pcm_mmap_get_hw_ptr(pcm, (unsigned int *)&position->position_frames, &ts);
      if (status < 0) {
-         status = -errno;
+         /* returning errno for every failure here is erronious */
+         /* as errno can be changed by any service/thread       */
+         /* system wide. Hence returning ENXIO - no device      */
+         /* available which turned out to be no timestamp data  */
+         /* is available yet.                                   */
+         status = -ENXIO;
          PAL_ERR(LOG_TAG, "%d", status);
          return status;
      }

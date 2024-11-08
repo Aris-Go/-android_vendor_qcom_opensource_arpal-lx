@@ -1048,6 +1048,7 @@ typedef enum {
     PAL_PARAM_ID_LATENCY_MODE = 73,
     PAL_PARAM_ID_PROXY_RECORD_SESSION = 74,
     PAL_PARAM_ID_ULTRASOUND_SET_GAIN = 75,
+    PAL_PARAM_ID_MIC_OCCLUSION_INFO = 76,
 } pal_param_id_type_t;
 
 /** HDMI/DP */
@@ -1298,11 +1299,21 @@ typedef struct pal_bt_tws_payload_s {
     uint32_t codecFormat;
 } pal_bt_tws_payload;
 
+/* Payload For ID: PAL_PARAM_ID_MIC_OCCLUSION_INFO
+ * Description   : mic occlusion related information.
+*/
+typedef struct pal_param_mic_occlusion_info {
+    pal_device_id_t   id;                 /**< Pal device id */
+    bool              is_occluded;        /**< currently is mic occluded?*/
+    uint32_t          num_of_occlusion;   /**< number of occlusions */
+    uint32_t          num_of_recovery;    /**< number of recoveries after occlusion. */
+} pal_param_mic_occlusion_info_t;
+
 /* Payload For Custom Config
  * Description : Used by PAL client to customize
  *               the device related information.
 */
-#define PAL_MAX_CUSTOM_KEY_SIZE 128
+#define PAL_MAX_CUSTOM_KEY_SIZE 256
 typedef struct pal_device_custom_config {
     char custom_key[PAL_MAX_CUSTOM_KEY_SIZE];
 } pal_device_custom_config_t;

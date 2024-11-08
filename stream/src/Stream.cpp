@@ -55,20 +55,6 @@
 std::shared_ptr<ResourceManager> Stream::rm = nullptr;
 std::mutex Stream::mBaseStreamMutex;
 std::mutex Stream::pauseMutex;
-std::condition_variable Stream::pauseCV;
-
-
-void Stream::handleSoftPauseCallBack(uint64_t hdl, uint32_t event_id,
-                                        void *data __unused,
-                                        uint32_t event_size __unused) {
-
-    PAL_DBG(LOG_TAG,"Event id %x ", event_id);
-
-    if (event_id == EVENT_ID_SOFT_PAUSE_PAUSE_COMPLETE) {
-        PAL_DBG(LOG_TAG, "Pause done");
-        pauseCV.notify_all();
-    }
-}
 
 Stream* Stream::create(struct pal_stream_attributes *sAttr, struct pal_device *dAttr,
     uint32_t noOfDevices, struct modifier_kv *modifiers, uint32_t noOfModifiers)
@@ -170,6 +156,10 @@ Stream* Stream::create(struct pal_stream_attributes *sAttr, struct pal_device *d
         }
 
         count++;
+    }
+
+    if (noOfDevices == 1 && !rm->is_multiple_sample_rate_combo_supported) {
+        rm->checkAndUpdateHeadsetDevConfig(&palDevsAttr[0], false);
     }
 
 stream_create:
@@ -1255,6 +1245,19 @@ int32_t Stream::handleBTDeviceNotReady(bool& a2dpSuspend)
                 goto exit;
             }
 
+            /* Special handling for aaudio usecase on Speaker
+             * Speaker device start needs to be called before graph_open
+             * to start VI feedback graph and send SP payload to AGM.
+             */
+            if (dev->getSndDeviceId() == PAL_DEVICE_OUT_SPEAKER && isMMap) {
+                status = dev->start();
+                if (0 != status) {
+                    PAL_ERR(LOG_TAG, "Speaker device start failed with status %d", status);
+                    dev->close();
+                    mDevices.pop_back();
+                    goto exit;
+                }
+            }
             status = session->connectSessionDevice(this, mStreamAttr->type, dev);
             if (0 != status) {
                 PAL_ERR(LOG_TAG, "connectSessionDevice failed:%d", status);
@@ -1285,11 +1288,11 @@ int32_t Stream::disconnectStreamDevice_l(Stream* streamHandle, pal_device_id_t d
 {
     int32_t status = 0;
 
-    if (currentState == STREAM_IDLE) {
+    if (currentState == STREAM_IDLE || PAL_CARD_STATUS_DOWN(rm->cardState)) {
         for (int i = 0; i < mDevices.size(); i++) {
             if (dev_id == mDevices[i]->getSndDeviceId()) {
                 mDevices.erase(mDevices.begin() + i);
-                PAL_DBG(LOG_TAG, "stream is in IDLE state, erase device: %d", dev_id);
+                PAL_DBG(LOG_TAG, "stream is in IDLE state or SSR coming, erase device: %d", dev_id);
                 break;
             }
         }
@@ -1331,9 +1334,10 @@ int32_t Stream::disconnectStreamDevice_l(Stream* streamHandle, pal_device_id_t d
              */
 
             if ((currentState != STREAM_INIT && currentState != STREAM_STOPPED) ||
-                (currentState == STREAM_INIT &&
+                ((currentState == STREAM_INIT || currentState == STREAM_STOPPED) &&
                 ((mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_A2DP) ||
-                (mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_BLE)) &&
+                (mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_BLE) ||
+                (mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_SPEAKER)) &&
                  isMMap)) {
                 status = mDevices[i]->stop();
                 if (0 != status) {
@@ -1391,8 +1395,8 @@ int32_t Stream::connectStreamDevice_l(Stream* streamHandle, struct pal_device *d
 
     dev->setDeviceAttributes(*dattr);
 
-    if (currentState == STREAM_IDLE) {
-        PAL_DBG(LOG_TAG, "stream is in IDLE state, insert %d to mDevices", dev->getSndDeviceId());
+    if (currentState == STREAM_IDLE || PAL_CARD_STATUS_DOWN(rm->cardState)) {
+        PAL_DBG(LOG_TAG, "stream is in IDLE state or SSR coming, insert %d to mDevices", dev->getSndDeviceId());
         mDevices.push_back(dev);
         status = 0;
         goto exit;
@@ -1447,9 +1451,9 @@ int32_t Stream::connectStreamDevice_l(Stream* streamHandle, struct pal_device *d
         goto dev_close;
     }
 
-    /* Special handling for aaudio usecase on A2DP/BLE.
-     * For mmap usecase, if device switch happens to A2DP/BLE device
-     * before stream_start then start A2DP/BLE dev. since it won't be
+    /* Special handling for aaudio usecase on A2DP/BLE/Speaker.
+     * For mmap usecase, if device switch happens to A2DP/BLE/Speaker device
+     * before stream_start then start A2DP/BLE/speaker dev. since it won't be
      * started again as a part of pal_stream_start().
      *
      * Currently device switch to BT is not supported for stopped mmap stream.
@@ -1457,9 +1461,10 @@ int32_t Stream::connectStreamDevice_l(Stream* streamHandle, struct pal_device *d
     // TODO: add support for device switch to BT for stopped streams
     rm->lockGraph();
     if ((currentState != STREAM_INIT && currentState != STREAM_STOPPED) ||
-        (currentState == STREAM_INIT &&
+        ((currentState == STREAM_INIT || currentState == STREAM_STOPPED) &&
         ((dev->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_A2DP) ||
-        (dev->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_BLE)) &&
+        (dev->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_BLE) ||
+        (dev->getSndDeviceId() == PAL_DEVICE_OUT_SPEAKER)) &&
         isMMap)) {
         status = dev->start();
         if (0 != status) {
@@ -1620,13 +1625,6 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
         return -EINVAL;
     }
 
-    if (PAL_CARD_STATUS_DOWN(rm->cardState)) {
-        PAL_ERR(LOG_TAG, "Sound card offline/standby");
-        mStreamMutex.unlock();
-        rm->unlockActiveStream();
-        return 0;
-    }
-
     streamHandle->getStreamAttributes(&strAttr);
 
     for (int i = 0; i < mDevices.size(); i++) {
@@ -1643,6 +1641,15 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
          */
         matchFound = false;
         for (int j = 0; j < numDev; j++) {
+            if(numDev > 1 && (newDevices[j].id == PAL_DEVICE_OUT_SPEAKER ||
+                                    newDevices[j].id == PAL_DEVICE_OUT_WIRED_HEADSET ||
+                                    newDevices[j].id == PAL_DEVICE_OUT_WIRED_HEADPHONE)) {
+               PAL_DBG(LOG_TAG, "isComboHeadsetActive true, %pk", streamHandle);
+               streamHandle->isComboHeadsetActive = true;
+            } else {
+               PAL_DBG(LOG_TAG, "isComboHeadsetActive false, %pk", streamHandle);
+               streamHandle->isComboHeadsetActive = false;
+            }
             if (curDevId == newDevices[j].id) {
                 matchFound = true;
                 /* special handle if same device switch is triggered by different custom key */
@@ -1706,9 +1713,7 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
             return 0;
         }
         devReadyStatus = rm->isDeviceReady(newDevices[i].id);
-        if ((newDevices[i].id == PAL_DEVICE_OUT_BLUETOOTH_A2DP) ||
-            (newDevices[i].id == PAL_DEVICE_OUT_BLUETOOTH_BLE) ||
-            (newDevices[i].id == PAL_DEVICE_OUT_BLUETOOTH_BLE_BROADCAST)) {
+        if (rm->isBtA2dpDevice(newDevices[i].id)) {
             isNewDeviceA2dp = true;
             newBtDevId = newDevices[i].id;
             isBtReady = devReadyStatus;
@@ -1959,6 +1964,10 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
 
     mStreamMutex.unlock();
     rm->unlockActiveStream();
+
+    if (numDev == 1 && !rm->is_multiple_sample_rate_combo_supported) {
+        rm->checkAndUpdateHeadsetDevConfig(&newDevices[0], true);
+    }
 
     status = rm->restoreDeviceConfigForUPD(streamDevDisconnect, StreamDevConnect,
                                            streamsSkippingSwitch);

@@ -150,7 +150,7 @@ typedef enum {
 #define HANDSET_PROT_ENABLE 48
 #define HAPTICS_VI_ENABLE 49
 #define HAPTICS_PROT_ENABLE 50
-
+#define CRS_CALL_VOLUME 51
 
 /* This sleep is added to give time to kernel and
  * spf to recover from SSR so that audio-hal will
@@ -203,7 +203,6 @@ protected:
     stream_state_t currentState;
     stream_state_t cachedState;
     uint32_t mInstanceID = 0;
-    static std::condition_variable pauseCV;
     static std::mutex pauseMutex;
     bool mutexLockedbyRm = false;
     bool mDutyCycleEnable = false;
@@ -222,6 +221,7 @@ public:
     bool a2dpPaused = false;
     bool force_nlpi_vote = false;
     bool isMMap = false;
+    bool isComboHeadsetActive = false;
 #ifdef LINUX_ENABLED
     bool ecref_op = false;
     std::condition_variable ecref_cv;
@@ -324,8 +324,6 @@ public:
     virtual int32_t HandleConcurrentStream(bool active) { return 0; }
     virtual int32_t DisconnectDevice(pal_device_id_t device_id) { return 0; }
     virtual int32_t ConnectDevice(pal_device_id_t device_id) { return 0; }
-    static void handleSoftPauseCallBack(uint64_t hdl, uint32_t event_id, void *data,
-                                                           uint32_t event_size);
     static void handleStreamException(struct pal_stream_attributes *attributes,
                                       pal_stream_callback cb, uint64_t cookie);
     void lockStreamMutex() {

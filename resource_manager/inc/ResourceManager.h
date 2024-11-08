@@ -68,6 +68,17 @@ typedef enum {
     TX_HOSTLESS,
 } hostless_dir_t;
 
+typedef enum {
+    MIC_OCC_STATE_NO_OCCLUSION = 0,
+    MIC_OCC_STATE_MIC1_BLOCKED,
+    MIC_OCC_STATE_MIC0_BLOCKED,
+} mic_occlusion_states_t;
+
+typedef enum {
+    PRIMARY_MIC = 0,
+    SECONDARY_MIC,
+};
+
 #define audio_mixer mixer
 #define MAX_SND_CARD 10
 #define DUMMY_SND_CARD MAX_SND_CARD
@@ -91,6 +102,7 @@ typedef enum {
 #define AUDIO_PARAMETER_KEY_HAPTICS_PRIORITY "haptics_priority"
 #define AUDIO_PARAMETER_KEY_WSA_HAPTICS "haptics_through_wsa"
 #define AUDIO_PARAMETER_KEY_DUMMY_DEV_ENABLE "dummy_dev_enable"
+#define AUDIO_PARAMETER_MULTI_SR_COMBO_SUPPORTED "multiple_sample_rate_combo_supported"
 #define MAX_PCM_NAME_SIZE 50
 #define MAX_STREAM_INSTANCES (sizeof(uint64_t) << 3)
 #define MIN_USECASE_PRIORITY 0xFFFFFFFF
@@ -121,6 +133,8 @@ typedef enum {
 #ifdef SOC_PERIPHERAL_PROT
 #define SOC_PERIPHERAL_LIBRARY_PATH "/vendor/lib64/libPeripheralStateUtils.so"
 #endif
+
+#define V_BE_SUFFIX "-VT-"
 
 using InstanceListNode_t = std::vector<std::pair<int32_t, bool>> ;
 using nonTunnelInstMap_t = std::unordered_map<uint32_t, bool>;
@@ -587,6 +601,7 @@ protected:
     static std::map<std::string, uint32_t> btFmtTable;
     static std::map<std::string, int> spkrPosTable;
     static std::map<int, std::string> spkrTempCtrlsMap;
+    std::unordered_map<Stream *, std::vector<pal_param_mic_occlusion_info_t>> micOcclusionInfoMap;
     static std::map<uint32_t, uint32_t> btSlimClockSrcMap;
     static std::vector<deviceIn> deviceInfo;
     static std::vector<tx_ecinfo> txEcInfo;
@@ -633,13 +648,14 @@ protected:
     std::shared_ptr<SignalHandler> mSigHandler;
     static std::vector<int> spViChannelMapCfg;
     std::map<int, bool> PCMDataInstances;
+    int getPcmIdByDevInfoName(char *mixer_str);
 public:
     ~ResourceManager();
     static bool mixerClosed;
     enum card_status_t cardState;
     bool ssrStarted = false;
-    /* Variable to cache a2dp suspended state for a2dp device */
-    static bool a2dp_suspended;
+    //Variable to check if multiple sampe rate during combo device supported
+    static bool is_multiple_sample_rate_combo_supported;
     /* Variable to store whether Speaker protection is enabled or not */
     static bool isSpeakerProtectionEnabled;
     static bool isHandsetProtectionEnabled;
@@ -743,6 +759,11 @@ public:
     static int AudioFeatureStatsGetInfo(void **afs_payload, size_t *afs_payload_size);
     void checkQVAAppPresence(afs_param_payload_t *payload);
     pal_param_payload *AFSWakeUpAlgoDetection();
+
+    /** Update mic occlusion info when event is detected */
+    int32_t updateMicOcclusionInfo(Stream* stream_hdl, void* data);
+    void addMicOcclusionInfo(Stream *s);
+    void removeMicOcclusionInfo(Stream *s);
 
     /* checks config for both stream and device */
     bool isStreamSupported(struct pal_stream_attributes *attributes,
@@ -1073,6 +1094,7 @@ public:
                              const struct pal_stream_attributes *sAttr,
                              std::vector<Stream*> &streamsToSwitch,
                              struct pal_device *streamDevAttr);
+    void checkAndUpdateHeadsetDevConfig(struct pal_device *newDevAttr, bool isSwitchCase);
     static void sendCrashSignal(int signal, pid_t pid, uid_t uid);
     static bool isSsrDownFeasible(std::shared_ptr<ResourceManager> rm, int type);
     bool isStreamSupportedInsndCardStandy(uint32_t type);
@@ -1083,6 +1105,7 @@ public:
     int32_t resumeInCallMusic();
     int32_t pauseInCallMusic();
     static void setProxyRecordActive(bool isActive);
+    void WbSpeechConfig(pal_device_id_t devId, uint32_t param_id, void *param_payload);
 };
 
 #endif

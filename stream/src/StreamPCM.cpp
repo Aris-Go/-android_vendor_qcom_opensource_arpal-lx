@@ -43,6 +43,33 @@
 #include <unistd.h>
 #include <chrono>
 
+std::condition_variable pauseCV;
+
+static void handleSessionCallBack(uint64_t hdl, uint32_t event_id, void *data,
+                                  uint32_t event_size)
+{
+    Stream *s = (Stream *) hdl;
+    std::shared_ptr<ResourceManager> rm = nullptr;
+    pal_device_id_t dev_id;
+
+    PAL_DBG(LOG_TAG,"Event id %x ", event_id);
+
+    rm = ResourceManager::getInstance();
+    if (!rm) {
+        PAL_ERR(LOG_TAG, "ResourceManager getInstance failed");
+        return;
+    }
+
+    if (event_id == EVENT_ID_SOFT_PAUSE_PAUSE_COMPLETE) {
+        PAL_DBG(LOG_TAG, "Pause done");
+        pauseCV.notify_all();
+    } else if (event_id == EVENT_ID_MIC_OCCLUSION_STATUS_INFO) {
+        PAL_DBG(LOG_TAG," Mic Occlusion info received");
+        // Notify Resource Manager to update the cache.
+        rm->updateMicOcclusionInfo(s, data);
+    }
+}
+
 StreamPCM::StreamPCM(const struct pal_stream_attributes *sattr, struct pal_device *dattr,
                     const uint32_t no_of_devices, const struct modifier_kv *modifiers,
                     const uint32_t no_of_modifiers, const std::shared_ptr<ResourceManager> rm)
@@ -123,6 +150,18 @@ StreamPCM::StreamPCM(const struct pal_stream_attributes *sattr, struct pal_devic
     }
 
     PAL_VERBOSE(LOG_TAG, "Create new Devices with no_of_devices - %d", no_of_devices);
+    /* check if it's combo device with speaker + HS */
+    for (int i = 0; no_of_devices > 1 && i < no_of_devices; i++) {
+        if(dattr[i].id == PAL_DEVICE_OUT_SPEAKER ||
+            dattr[i].id == PAL_DEVICE_OUT_WIRED_HEADSET ||
+            dattr[i].id == PAL_DEVICE_OUT_WIRED_HEADPHONE) {
+           PAL_DBG(LOG_TAG, "set isComboHeadsetActive true, %pk", this);
+           this->isComboHeadsetActive = true;
+        } else {
+           PAL_DBG(LOG_TAG, "set isComboHeadsetActive false, %pk", this);
+           this->isComboHeadsetActive = false;
+        }
+    }
     bool str_registered = false;
     for (int i = 0; i < no_of_devices; i++) {
         //Check with RM if the configuration given can work or not
@@ -165,10 +204,8 @@ StreamPCM::StreamPCM(const struct pal_stream_attributes *sattr, struct pal_devic
         dev = nullptr;
     }
 
-
-    // Register for Soft pause events
-    if (mStreamAttr->direction == PAL_AUDIO_OUTPUT )
-        session->registerCallBack(handleSoftPauseCallBack, (uint64_t)this);
+    // Register for session events
+    session->registerCallBack(handleSessionCallBack, (uint64_t)this);
 
     mStreamMutex.unlock();
     PAL_DBG(LOG_TAG, "Exit. state %d", currentState);
@@ -310,14 +347,15 @@ int32_t  StreamPCM::close()
         if (0 != status)
             PAL_ERR(LOG_TAG, "stream stop failed. status %d",  status);
         mStreamMutex.lock();
-    } else if (currentState == STREAM_INIT) {
-        /* Special handling for aaudio usecase on A2DP/BLE.
+    } else if (currentState == STREAM_INIT || currentState == STREAM_STOPPED) {
+        /* Special handling for aaudio usecase on A2DP/BLE/Speaker.
          * A2DP/BLE device starts even when stream is still in STREAM_INIT state,
-         * hence stop A2DP/BLE device to match device start&stop count.
+         * hence stop A2DP/BLE/Speaker device to match device start&stop count.
          */
         for (int32_t i=0; i < mDevices.size(); i++) {
             if (((mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_A2DP) ||
-                 (mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_BLE)) && isMMap) {
+                 (mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_BLE) ||
+                 (mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_SPEAKER)) && isMMap) {
                 status = mDevices[i]->stop();
                 if (0 != status) {
                     PAL_ERR(LOG_TAG, "BT A2DP/BLE device stop failed with status %d", status);
@@ -430,8 +468,9 @@ int32_t StreamPCM::start()
 
             for (int32_t i=0; i < mDevices.size(); i++) {
                 if (((mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_A2DP) ||
-                     (mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_BLE)) && isMMap) {
-                    PAL_DBG(LOG_TAG, "skip BT A2DP/BLE device start as it's done already");
+                     (mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_BLE) ||
+                     (mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_SPEAKER)) && isMMap) {
+                    PAL_DBG(LOG_TAG, "skip BT A2DP/BLE/Speaker device start as it's done already");
                     status = 0;
                     continue;
                 }
@@ -701,6 +740,13 @@ int32_t StreamPCM::stop()
             PAL_VERBOSE(LOG_TAG, "session stop successful");
 
             for (int32_t i=0; i < mDevices.size(); i++) {
+                if (((mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_A2DP) ||
+                     (mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_BLE) ||
+                     (mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_SPEAKER)) && isMMap) {
+                    PAL_DBG(LOG_TAG, "skip BT A2DP/BLE/Speaker device stop, to be done in close/disconnect");
+                    status = 0;
+                    continue;
+                }
                 status = mDevices[i]->stop();
                 if (0 != status) {
                     PAL_ERR(LOG_TAG, "Rx device stop failed with status %d", status);
@@ -708,7 +754,6 @@ int32_t StreamPCM::stop()
                     goto exit;
                 }
             }
-            isMMap = false;
             rm->unlockGraph();
             PAL_VERBOSE(LOG_TAG, "devices stop successful");
             break;
@@ -896,7 +941,11 @@ int32_t StreamPCM::setVolume(struct pal_volume_data *volume)
         if (!forceSetParameters && mVolumeData->volume_pair[0].vol == 0.0f &&
             !vol_set_param_info.isVolumeUsingSetParam) {
             //if the volume is 0, force settting parameters as well
-            status = session->setConfig(this, CALIBRATION, TAG_STREAM_VOLUME);
+            if (rm->isCRSCallEnabled) {
+                status = session->setConfig(this, MODULE, CRS_CALL_VOLUME, RX_HOSTLESS);
+            } else {
+                status = session->setConfig(this, CALIBRATION, TAG_STREAM_VOLUME);
+            }
             forceSetParameters = true;
         }
         if ((isStreamAvail && vol_set_param_info.isVolumeUsingSetParam) || forceSetParameters) {
@@ -914,7 +963,11 @@ int32_t StreamPCM::setVolume(struct pal_volume_data *volume)
             delete[] volPayload;
             PAL_DBG(LOG_TAG, "set volume by parameter, status: %d", status);
         } else {
-            status = session->setConfig(this, CALIBRATION, TAG_STREAM_VOLUME);
+            if (rm->isCRSCallEnabled) {
+                status = session->setConfig(this, MODULE, CRS_CALL_VOLUME, RX_HOSTLESS);
+            } else {
+                status = session->setConfig(this, CALIBRATION, TAG_STREAM_VOLUME);
+            }
         }
 
         if (0 != status) {
@@ -1162,7 +1215,12 @@ int32_t  StreamPCM::setParameters(uint32_t param_id, void *payload)
             if (NULL != session) {
                 /* To avoid pop while switching channels, it is required to mute
                    the playback first and then swap the channel and unmute */
-                setConfigStatus = session->setConfig(this, MODULE, DEVICEPP_MUTE);
+                if (mStreamAttr->type == PAL_STREAM_LOW_LATENCY ||
+                    mStreamAttr->type == PAL_STREAM_ULTRA_LOW_LATENCY) {
+                    setConfigStatus = session->setConfig(this, MODULE, MUTE_TAG);
+                } else {
+                    setConfigStatus = session->setConfig(this, MODULE, DEVICEPP_MUTE);
+                }
                 if (setConfigStatus) {
                     PAL_INFO(LOG_TAG, "DevicePP Mute failed");
                 }
@@ -1175,7 +1233,12 @@ int32_t  StreamPCM::setParameters(uint32_t param_id, void *payload)
                 mStreamMutex.unlock();
                 usleep(MUTE_RAMP_PERIOD); // Wait for channel swap to take affect
                 mStreamMutex.lock();
-                setConfigStatus = session->setConfig(this, MODULE, DEVICEPP_UNMUTE);
+                if (mStreamAttr->type == PAL_STREAM_LOW_LATENCY ||
+                    mStreamAttr->type == PAL_STREAM_ULTRA_LOW_LATENCY) {
+                    setConfigStatus = session->setConfig(this, MODULE, UNMUTE_TAG);
+                } else {
+                    setConfigStatus = session->setConfig(this, MODULE, DEVICEPP_UNMUTE);
+                }
                 if (setConfigStatus) {
                     PAL_INFO(LOG_TAG, "DevicePP Unmute failed");
                 }
@@ -1675,7 +1738,8 @@ int32_t StreamPCM::createMmapBuffer(int32_t min_size_frames,
     if (currentState == STREAM_INIT) {
         rm->lockGraph();
         for (int32_t i=0; i < mDevices.size(); i++) {
-            if (rm->isBtDevice((pal_device_id_t) mDevices[i]->getSndDeviceId())) {
+            if (rm->isBtDevice((pal_device_id_t) mDevices[i]->getSndDeviceId()) ||
+                (mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_SPEAKER)) {
                 PAL_DBG(LOG_TAG, "start BT devices as to populate the full GKVs");
                 status = mDevices[i]->start();
                 btDevStarted = !status;
